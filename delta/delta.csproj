@@ -6,7 +6,7 @@
     <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
     <ProjectGuid>{FDF9B4C4-425A-4CF1-B783-1766F23026CE}</ProjectGuid>
     <OutputType>Exe</OutputType>
-    <RootNamespace>delta</RootNamespace>
+    <RootNamespace>Delta</RootNamespace>
     <AssemblyName>delta</AssemblyName>
     <TargetFrameworkVersion>v4.6.1</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
@@ -42,8 +42,12 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Delta.cs" />
+    <Compile Include="Options.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="DeltaSortedFileLists.cs" />
+    <Compile Include="StringTools.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
