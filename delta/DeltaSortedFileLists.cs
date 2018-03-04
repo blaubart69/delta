@@ -5,119 +5,187 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
+using Spi;
 using Spi.Data;
 
 namespace Delta
 {
-    class DeltaWriter
+    public class DeltaWriter
     {
-        public TextWriter outWriter;
-        public TextWriter newWriter;
-        public TextWriter modWriter;
-        public TextWriter delWriter;
+        //public TextWriter outWriter;
+        public TextWriter newFilesWriter;
+        public TextWriter modFilesWriter;
+        public TextWriter delFilesWriter;
     }
-    class DeltaSortedFileLists
+    public class DeltaSortedFileLists
     {
         private static bool _debug;
 
-        public static void Run(IEnumerable<string> linesA, IEnumerable<string> linesB, DeltaWriter writer, bool debug)
+        public static void Run(IEnumerable<TSV_DATA> findA, IEnumerable<TSV_DATA> findB, DeltaWriter writer, 
+            out List<string> newDirs, out List<string> delDirs,
+            out List<TSV_DATA> findASorted, out List<TSV_DATA> findBSorted)
         {
-            _debug = debug;
+            newDirs = null;
+            delDirs = null;
+            findASorted = null;
+            findBSorted = null;
 
-            Task<List<string>> sortedA = Task.Run(() => { return linesA.OrderBy(line => line, StringComparer.OrdinalIgnoreCase).ToList(); });
-            Task<List<string>> sortedB = Task.Run(() => { return linesB.OrderBy(line => line, StringComparer.OrdinalIgnoreCase).ToList(); });
+            Console.Error.WriteLine("trying diff on given data");
+            bool wasSorted = true;
+            try
+            {
+                DoDiff(findA, findB, writer, out newDirs, out delDirs);
+            }
+            catch (ApplicationException appEx)
+            {
+                wasSorted = false;
+                Console.Error.WriteLine(appEx.Message);
+                Console.Error.WriteLine("data was not sorted!");
+            }
+
+            if (!wasSorted)
+            {
+                Console.Error.WriteLine("reading files again and sorting");
+                Task<List<TSV_DATA>> sortedA = SortData(findA, "A");
+                Task<List<TSV_DATA>> sortedB = SortData(findB, "B");
+
+                while (!Task.WaitAll(new Task[] { sortedA, sortedB }, millisecondsTimeout: 5000))
+                {
+                    try
+                    {
+                        var proc = System.Diagnostics.Process.GetCurrentProcess();
+                        Console.Error.WriteLine($"virtMem: {Misc.GetPrettyFilesize(proc.VirtualMemorySize64)}");
+                    }
+                    catch { }
+                }
+
+                findASorted = sortedA.Result;
+                findBSorted = sortedB.Result;
+                Console.Error.WriteLine($"number sorted items A/B: {findASorted.Count}/{findBSorted.Count}");
+
+                Console.Error.WriteLine("running diff now on sorted data");
+                DoDiff(sortedA.Result, sortedB.Result, writer, out newDirs, out delDirs);
+            }
+
+            File.WriteAllLines(@".\DelDirsBeforeCompress.txt", delDirs);
+            delDirs.Sort();
+            IEnumerable<string> compressDelDirs = CompressToBaseDirs(delDirs);
+            delDirs = compressDelDirs.ToList();
+        }
+        public static IEnumerable<string> CompressToBaseDirs(IEnumerable<string> sortedDirs)
+        {
+            string shortDir = null;
+            foreach ( string dir in sortedDirs)
+            {
+                if (shortDir==null)
+                {
+                    shortDir = dir;
+                    continue;
+                }
+
+                int cmp = String.Compare(strA: shortDir, indexA: 0, strB: dir, indexB: 0, length: shortDir.Length, ignoreCase: true);
+                if ( cmp < 0 )
+                {
+                    yield return shortDir;
+                    shortDir = dir;
+                }
+                else if ( cmp > 0 )
+                {
+                    throw new Exception(
+                        $"CompressDelDirs: dirname curr < last"
+                        + $"\ncurr [{dir}]"
+                        + $"\nlast [{shortDir}]");
+                }
+            }
+            yield return shortDir;
+        }
+        private static void DoDiff(IEnumerable<TSV_DATA> sortedA, IEnumerable<TSV_DATA> sortedB, DeltaWriter writer, out List<string> newDirs, out List<string> delDirs)
+        {
+            List<string> tmpNewDirs = new List<string>();
+            List<string> tmpDelDirs = new List<string>();
 
             uint diff =
-                Spi.Data.Diff.DiffSortedEnumerables<string,string,string>(
-                sortedA.Result, 
-                sortedB.Result,
-                KeySelector: line =>
+                Spi.Data.Diff.DiffSortedEnumerables<TSV_DATA>(
+                sortedA,
+                sortedB,
+                KeyComparer: (TSV_DATA a, TSV_DATA b) =>
                 {
-                    GetFilenameAndRest(line, out string filename, out string rest);
-                    return filename;
-                },
-                KeyComparer: (a,b) =>
-                {
-                    return String.Compare(a, b, StringComparison.OrdinalIgnoreCase);
-                },
-                AttributeSelector: line =>
-                {
-                    GetFilenameAndRest(line, out string filename, out string rest);
-                    return rest;
-                },
-                AttributeComparer: (a,b) =>
-                {
-                    var aValues = a.Split('\t');
-                    var bValues = b.Split('\t');
+                    int cmp = String.Compare(a.relativeFilename, b.relativeFilename, StringComparison.OrdinalIgnoreCase);
+                    if (cmp != 0)
+                    {
+                        return cmp;
+                    }
+                    bool KindOfA = Spi.Misc.IsDirectoryFlagSet(a.dwFileAttributes);
+                    bool KindOfB = Spi.Misc.IsDirectoryFlagSet(b.dwFileAttributes);
 
-                    int SizeCmp = String.CompareOrdinal(aValues[0], bValues[0]);
-                    if (SizeCmp != 0) return SizeCmp;
-
-                    int lastWriteCmp = String.CompareOrdinal(aValues[3], bValues[3]);
-                    if (lastWriteCmp != 0) return lastWriteCmp;
+                    return KindOfA == KindOfB
+                                ?  0    // two directories OR two files --> same name --> return 0 
+                                : -1;   // one dir AND one file         --> same name --> return -1 to represent the difference
+                },
+                AttributeComparer: (TSV_DATA a, TSV_DATA b) =>
+                {
+                    if (Misc.IsDirectoryFlagSet(a.dwFileAttributes) && Misc.IsDirectoryFlagSet(b.dwFileAttributes))
+                    {
+                        return 0;
+                    }
+                    long cmp;
+                    if ((cmp = (a.timeModified - b.timeModified)) != 0)
+                    {
+                        return (int)cmp;
+                    }
+                    if ((cmp = (long)(a.size - b.size)) != 0)
+                    {
+                        return (int)cmp;
+                    }
 
                     return 0;
                 },
-                OnCompared: (DIFF_STATE state, string lineA, string lineB) =>
+                OnCompared: (DIFF_STATE state, TSV_DATA a, TSV_DATA b) =>
                 {
-                    string filename;
-                    string rest;
-
                     switch (state)
                     {
-                        case DIFF_STATE.NEW:    GetFilenameAndRest(lineB, out filename, out rest); writer.newWriter.WriteLine(filename); break;
-                        case DIFF_STATE.MODIFY: GetFilenameAndRest(lineB, out filename, out rest); writer.modWriter.WriteLine(filename); break;
-                        case DIFF_STATE.DELETE: GetFilenameAndRest(lineA, out filename, out rest); writer.delWriter.WriteLine(filename); break;
+                        case DIFF_STATE.NEW:
+                            if (Misc.IsDirectoryFlagSet(b.dwFileAttributes))
+                            {
+                                tmpNewDirs.Add(b.relativeFilename);
+                            }
+                            else
+                            {
+                                writer.newFilesWriter.WriteLine(b.relativeFilename);
+                            }
+                            break;
+                        case DIFF_STATE.MODIFY:
+                            writer.modFilesWriter.WriteLine(b.relativeFilename);
+                            break;
+                        case DIFF_STATE.DELETE:
+                            if (Misc.IsDirectoryFlagSet(a.dwFileAttributes))
+                            {
+                                tmpDelDirs.Add(a.relativeFilename);
+                            }
+                            else
+                            {
+                                writer.delFilesWriter.WriteLine(a.relativeFilename);
+                            }
+                            break;
                     }
                 },
-                checkSortorder: true);
+                checkSortOrder: true);
+
+            newDirs = tmpNewDirs;
+            delDirs = tmpDelDirs;
         }
-        /*
-        private static DIFF_COMPARE_RESULT CompareTwoFileLines(string a, string b)
+        private static Task<List<TSV_DATA>> SortData(IEnumerable<TSV_DATA> data, string label)
         {
-            GetFilenameAndRest(a, out string filenameA, out string restA);
-            GetFilenameAndRest(b, out string filenameB, out string restB);
-
-            int cmpName = String.Compare(filenameA, filenameB, StringComparison.OrdinalIgnoreCase);
-            int cmpProps = -1;
-
-            DIFF_COMPARE_RESULT result;
-
-            if (cmpName == 0)
-            {
-                cmpProps = String.Compare(restA, restB, StringComparison.OrdinalIgnoreCase);
-                if (cmpProps == 0)
-                {
-                    result = DIFF_COMPARE_RESULT.EQUAL;
-                }
-                else
-                {
-                    result = DIFF_COMPARE_RESULT.MODIFY;
-                }
-            }
-            else if ( cmpName < 0 )
-            {
-                result = DIFF_COMPARE_RESULT.LESS;
-            }
-            else
-            {
-                result = DIFF_COMPARE_RESULT.GREATER;
-            }
-
-            Console.Error.WriteLine($"\na [{filenameA}]\nb [{filenameB}]\nintCmp: {cmpName} intCmpProps: {cmpProps} diff: {result.ToString()}");
-
-            return result;
-        }
-        */
-        private static void GetFilenameAndRest(string line, out string filename, out string rest)
-        {
-            int firstBackslash = line.IndexOf('\t');
-            if ( firstBackslash == -1 )
-            {
-                throw new Exception($"line has no TAB. wrong format. line is: [{line}]");
-            }
-            filename = line.Substring(0, firstBackslash);
-            rest = line.Substring(firstBackslash + 1);
+            return
+                Task.Run(
+                    () => 
+                    {
+                        Console.Error.WriteLine($"reading {label}");
+                        List<TSV_DATA> memData = data.ToList();
+                        Console.Error.WriteLine($"sorting {label}");
+                        memData.Sort((a, b) => String.Compare(a.relativeFilename, b.relativeFilename, StringComparison.OrdinalIgnoreCase));
+                        return memData;
+                    });
         }
     }
 }
