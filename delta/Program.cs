@@ -5,11 +5,14 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
+using Spi;
+
 namespace Delta
 {
     class Opts
     {
         public bool debug;
+        public bool writeOutSorted;
         public string fileA;
         public string fileB;
         public string outfile;
@@ -36,33 +39,28 @@ namespace Delta
 
                 using (FileStream streamA = new FileStream(opts.fileA, FileMode.Open))
                 using (FileStream streamB = new FileStream(opts.fileB, FileMode.Open))
-                //using (TextWriter outWriter = new StreamWriter(opts.outfile, append: false, encoding: Encoding.UTF8))
                 using (TextWriter newWriter = new StreamWriter(opts.newfile, append: false, encoding: Encoding.UTF8))
                 using (TextWriter modWriter = new StreamWriter(opts.modfile, append: false, encoding: Encoding.UTF8))
                 using (TextWriter delWriter = new StreamWriter(opts.delfile, append: false, encoding: Encoding.UTF8))
                 {
-                    DeltaSortedFileLists.Run(
+                    Stats stats = DeltaSortedFileLists.Run(
                         findA: StringTools.ReadLines(streamA, $"ReadLines A {opts.fileA}\t").Select(line => TSV_DATA.Parse(line)),
                         findB: StringTools.ReadLines(streamB, $"ReadLines B {opts.fileB}\t").Select(line => TSV_DATA.Parse(line)),
                         writer: new DeltaWriter()
                         {
-                            //outWriter = outWriter,
                             newFilesWriter = newWriter,
                             modFilesWriter = modWriter,
                             delFilesWriter = delWriter
                         },
                         newDirs: out List<string> newDirs,
                         delDirs: out List<string> delDirs,
-                        findASorted: out List<TSV_DATA> findASorted,
-                        findBSorted: out List<TSV_DATA> findBSorted);
-
-                    Task writeSortedA = (findASorted == null) ? Task.CompletedTask : WriteTsvData(GetSortedFilename(opts.fileA), findASorted);
-                    Task writeSortedB = (findBSorted == null) ? Task.CompletedTask : WriteTsvData(GetSortedFilename(opts.fileB), findBSorted);
+                        sortedAfilename: opts.writeOutSorted ? GetSortedFilename(opts.fileA) : null,
+                        sortedBfilename: opts.writeOutSorted ? GetSortedFilename(opts.fileB) : null);
 
                     File.WriteAllLines(path: opts.newdir, contents: newDirs, encoding: Encoding.UTF8);
                     File.WriteAllLines(path: opts.deldir, contents: delDirs, encoding: Encoding.UTF8);
 
-                    Task.WaitAll(writeSortedA, writeSortedB);
+                    WriteStats(stats, newDirs.Count, delDirs.Count);
                 }
                 return 0;
             }
@@ -83,14 +81,18 @@ namespace Delta
 
             }
         }
-        static Task WriteTsvData(string filename, IEnumerable<TSV_DATA> find_data)
+
+        private static void WriteStats(Stats stats, int newDirsCount, int delDirsCount)
         {
-            return Task.Run(() =>
-            {
-                Console.Error.WriteLine($"writing data to {filename}");
-                File.WriteAllLines(filename, find_data.Select(item => item.ToString()), Encoding.UTF8);
-            });
+            Console.Error.WriteLine(
+                $"\nnew files\t{stats.newFiles,12}\t{Misc.GetPrettyFilesize(stats.newFilesSize)}"
+              + $"\nmod files\t{stats.modFiles,12}\t{Misc.GetPrettyFilesize(stats.modFilesSize)}"
+              + $"\ndel files\t{stats.delFiles,12}\t{Misc.GetPrettyFilesize(stats.delFilesSize)}"
+              + $"\nnew dirs \t{newDirsCount,12}"
+              + $"\ndel dirs \t{delDirsCount,12}"
+              );
         }
+
         static string GetSortedFilename(string datafilename)
         {
             return datafilename + "_SORTED" + Path.GetExtension(datafilename);
@@ -115,6 +117,7 @@ namespace Delta
             Opts opts = new Opts();
             var p = new Mono.Options.OptionSet() {
                 { "o|out=",     "filename for result of compare",           v => opts.outfile = v },
+                { "s|sorted",   "write out sorted files",                   v => opts.writeOutSorted = v != null },
                 { "d|debug",    "debug",                                    v => opts.debug = v != null },
                 { "h|help",     "show this message and exit",               v => show_help = v != null },
             };

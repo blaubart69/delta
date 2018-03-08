@@ -17,24 +17,35 @@ namespace Delta
         public TextWriter modFilesWriter;
         public TextWriter delFilesWriter;
     }
+    public class Stats
+    {
+        public ulong newFiles;
+        public ulong newFilesSize;
+        public ulong modFiles;
+        public ulong modFilesSize;
+        public ulong delFiles;
+        public ulong delFilesSize;
+    }
     public class DeltaSortedFileLists
     {
         private static bool _debug;
 
-        public static void Run(IEnumerable<TSV_DATA> findA, IEnumerable<TSV_DATA> findB, DeltaWriter writer, 
+        public static Stats Run(IEnumerable<TSV_DATA> findA, IEnumerable<TSV_DATA> findB, DeltaWriter writer, 
             out List<string> newDirs, out List<string> delDirs,
-            out List<TSV_DATA> findASorted, out List<TSV_DATA> findBSorted)
+            string sortedAfilename, string sortedBfilename)
         {
             newDirs = null;
             delDirs = null;
-            findASorted = null;
-            findBSorted = null;
+            Stats stats = null;
+
+            List<TSV_DATA> newFiles;
+            List<TSV_DATA> delFiles;
 
             Console.Error.WriteLine("trying diff on given data");
             bool wasSorted = true;
             try
             {
-                DoDiff(findA, findB, writer, out newDirs, out delDirs);
+                stats = DoDiff(findA, findB, writer, out newDirs, out delDirs, out newFiles, out delFiles);
             }
             catch (ApplicationException appEx)
             {
@@ -43,6 +54,8 @@ namespace Delta
                 Console.Error.WriteLine("data was not sorted!");
             }
 
+            Task writeSortedA = Task.CompletedTask;
+            Task writeSortedB = Task.CompletedTask;
             if (!wasSorted)
             {
                 Console.Error.WriteLine("reading files again and sorting");
@@ -58,19 +71,25 @@ namespace Delta
                     }
                     catch { }
                 }
+                Console.Error.WriteLine($"number sorted items A/B: {sortedA.Result.Count}/{sortedB.Result.Count}");
 
-                findASorted = sortedA.Result;
-                findBSorted = sortedB.Result;
-                Console.Error.WriteLine($"number sorted items A/B: {findASorted.Count}/{findBSorted.Count}");
+                writeSortedA = (sortedAfilename == null) ? Task.CompletedTask : WriteTsvData(sortedAfilename, sortedA.Result);
+                writeSortedB = (sortedBfilename == null) ? Task.CompletedTask : WriteTsvData(sortedBfilename, sortedB.Result);
 
-                Console.Error.WriteLine("running diff now on sorted data");
-                DoDiff(sortedA.Result, sortedB.Result, writer, out newDirs, out delDirs);
+                Console.Error.WriteLine("running diff on sorted data");
+                stats = DoDiff(sortedA.Result, sortedB.Result, writer, out newDirs, out delDirs, out newFiles, out delFiles);
+
+
             }
 
             File.WriteAllLines(@".\DelDirsBeforeCompress.txt", delDirs);
             delDirs.Sort();
             IEnumerable<string> compressDelDirs = CompressToBaseDirs(delDirs);
             delDirs = compressDelDirs.ToList();
+
+            Task.WaitAll(new Task[] { writeSortedA, writeSortedB });
+
+            return stats;
         }
         public static IEnumerable<string> CompressToBaseDirs(IEnumerable<string> sortedDirs)
         {
@@ -97,12 +116,24 @@ namespace Delta
                         + $"\nlast [{shortDir}]");
                 }
             }
-            yield return shortDir;
+            if (shortDir == null)
+            {
+                yield break;
+            }
+            else
+            {
+                yield return shortDir;
+            }
         }
-        private static void DoDiff(IEnumerable<TSV_DATA> sortedA, IEnumerable<TSV_DATA> sortedB, DeltaWriter writer, out List<string> newDirs, out List<string> delDirs)
+        private static Stats DoDiff(IEnumerable<TSV_DATA> sortedA, IEnumerable<TSV_DATA> sortedB, DeltaWriter writer, out List<string> newDirs, out List<string> delDirs,
+            out List<TSV_DATA> newFiles, out List<TSV_DATA> delFiles)
         {
             List<string> tmpNewDirs = new List<string>();
             List<string> tmpDelDirs = new List<string>();
+            List<TSV_DATA> tmpNewFiles = new List<TSV_DATA>();
+            List<TSV_DATA> tmpDelFiles = new List<TSV_DATA>();
+
+            Stats stats = new Stats();
 
             uint diff =
                 Spi.Data.Diff.DiffSortedEnumerables<TSV_DATA>(
@@ -152,10 +183,15 @@ namespace Delta
                             else
                             {
                                 writer.newFilesWriter.WriteLine(b.relativeFilename);
+                                tmpNewFiles.Add(b);
+                                stats.newFiles += 1;
+                                stats.newFilesSize += b.size;
                             }
                             break;
                         case DIFF_STATE.MODIFY:
                             writer.modFilesWriter.WriteLine(b.relativeFilename);
+                            stats.modFiles += 1;
+                            stats.modFilesSize += b.size;
                             break;
                         case DIFF_STATE.DELETE:
                             if (Misc.IsDirectoryFlagSet(a.dwFileAttributes))
@@ -165,6 +201,9 @@ namespace Delta
                             else
                             {
                                 writer.delFilesWriter.WriteLine(a.relativeFilename);
+                                tmpDelFiles.Add(a);
+                                stats.delFiles += 1;
+                                stats.delFilesSize += a.size;
                             }
                             break;
                     }
@@ -173,6 +212,11 @@ namespace Delta
 
             newDirs = tmpNewDirs;
             delDirs = tmpDelDirs;
+
+            newFiles = tmpNewFiles;
+            delFiles = tmpDelFiles;
+
+            return stats;
         }
         private static Task<List<TSV_DATA>> SortData(IEnumerable<TSV_DATA> data, string label)
         {
@@ -186,6 +230,14 @@ namespace Delta
                         memData.Sort((a, b) => String.Compare(a.relativeFilename, b.relativeFilename, StringComparison.OrdinalIgnoreCase));
                         return memData;
                     });
+        }
+        static Task WriteTsvData(string filename, IEnumerable<TSV_DATA> find_data)
+        {
+            return Task.Run(() =>
+            {
+                Console.Error.WriteLine($"writing data to {filename}");
+                File.WriteAllLines(filename, find_data.Select(item => item.ToString()), Encoding.UTF8);
+            });
         }
     }
 }

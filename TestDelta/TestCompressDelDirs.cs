@@ -34,5 +34,13 @@ namespace TestDelta
             List<string> compressed = DeltaSortedFileLists.CompressToBaseDirs(dirs).ToList();
             Assert.AreEqual(2, compressed.Count);
         }
+        [TestMethod]
+        public void EmptyInput()
+        {
+            var dirs = new List<string>();
+            dirs.Sort();
+            List<string> compressed = DeltaSortedFileLists.CompressToBaseDirs(dirs).ToList();
+            Assert.AreEqual(0, compressed.Count);
+        }
     }
 }
